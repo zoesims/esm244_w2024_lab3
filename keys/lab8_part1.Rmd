@@ -1,0 +1,173 @@
+---
+title: 'ESM 244 Lab 8 Part 1: Spatial point pattern analysis'
+author: "Allison Horst, Casey O'Hara"
+date: "2/24/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+See: - CRS & proj4 components breakdown: https://www.earthdatascience.org/courses/earth-analytics/spatial-data-r/reproject-vector-data/
+
+```{r setup, include = TRUE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning= FALSE, message = FALSE)
+library(spatstat)
+library(terra) 
+library(tidyverse)
+library(here)
+library(sf)
+library(tmap)
+```
+
+This is an example of point pattern analysis with a density plot, and the G- & L- function (distance methods) to compare our observed points with simulated complete spatial randomness.
+
+```{r}
+### Read in the tree vole data
+voles_sf <- read_sf(dsn = here("redtreevoledata"), 
+                 layer = "ds033") %>% 
+  janitor::clean_names() %>%
+  select(county) %>% # Only select the county attribute; geometry sticks
+  filter(county == "HUM") %>% # Only keep observations in Humboldt County
+  st_transform(crs = 32610) # Update CRS to UTM zone 10 N
+
+
+### Plot it (exploratory)
+plot(voles_sf)
+
+
+### Get Humboldt County outline
+humboldt_sf <- read_sf(dsn = here("redtreevoledata"), 
+                    layer = "california_county_shape_file") %>% 
+  janitor::clean_names() %>%
+  filter(name == "Humboldt") %>% # Isolate Humboldt County
+  select(name) %>% # Only keep one attribute (name) to simplify
+  st_set_crs(4326) %>%
+  st_transform(crs = 32610)
+
+
+### plot them together
+ggplot() +
+  geom_sf(data = humboldt_sf, 
+          color = "darkorchid", 
+          fill = "darkorchid4", 
+          size = 1) +
+  geom_sf(data = voles_sf, 
+          color = "orange", 
+          alpha = 0.7, 
+          size = 2) +
+  theme_void()
+```
+
+These need to be combined into spatial point pattern data (points + window combo), and for point pattern analysis this **requires a 2D projection** (in this case, UTM), which is why we set the CRS to 32610 above. This looks quite a bit different from what we've done so far - it uses functions in `spatstat` to create point patterns that play nicely with other functions for data viz & point pattern analysis.
+
+```{r}
+### Convert to spatial point pattern
+voles_ppp <- as.ppp(voles_sf) 
+
+### Convert to spatial point pattern from spatstat
+humboldt_win <- as.owin(humboldt_sf) 
+
+### Combine as a point pattern object (points + window):
+voles_full <- ppp(voles_ppp$x, voles_ppp$y, window = humboldt_win)
+
+
+plot(voles_full) 
+### Illegal point (outside window) shows up as the plus sign
+```
+
+## Make a kernel density plot:
+
+### Density
+
+Run to see vole "hotspots" by kernel density, then see what happens when you change sigma here!
+
+```{r}
+voles_density <- density(voles_full, sigma = 5000)
+
+plot(voles_density)
+```
+
+Pretty clear that there are "hotspots" where voles are observed - both in the originally plotted data and in the density plot. How can we compare this to complete spatial randomness? 
+
+```{r}
+### Can you start viewing this in tmap? Yes, rasterize it: 
+vole_r <- rast(voles_density)
+crs(vole_r) <- crs(voles_sf)
+
+### Then plot: 
+tmap_mode("view")
+
+tm_shape(vole_r) +
+  tm_raster(midpoint = NA, 
+            palette = "Reds", 
+            legend.show = FALSE)
+```
+
+## Nearest neighbor (G-function)
+
+In this week's lecture, we learned about distance methods to compare our point pattern to a scenario of complete spatial randomness. Here, we'll use both the G- and L-functions (L function is the K-function, standardized...interpretation is the same) to compare our observed point pattern to a simulated CSR scenario, to help us determine if it is *more clustered* or *more uniform* than CSR.
+
+What is going on in this code? 
+
+- `r`: a sequence of distances (in the spatial units of the data) over which we'll calculate the proportion of points with nearest neighbor within that range
+
+- `gfunction`: This uses the `envelope()` function within which we run simulations for CSR, *and* calculate the G-function value at distances *r* for each simulation. So this will calculate the G-function for *our* actual data, and also for simulations of CSR if we had the same number of observations in the window but they were independent. The `nsim = 100` here means there will be 100 simulations of CSR. The `nrank = 2` means that the second highest and second lowest values from simulations are shown as the "hi" and "lo" value envelopes, with the "theo" being the "theoretical value of the summary function under CSR (Complete Spatial Randomness, a uniform Poisson point process) if the simulations were generated according to CSR." So we're really comparing our "observed" data to the "theoretical CSR" here, and those "hi" and "lo" envelope bounds give us an idea of spread for the simulations. 
+ 
+```{r}
+### Make a sequence of distances over which you'll calculate G(r)
+r_vec <- seq(0, 10000, by = 100) 
+
+
+gfunction <- envelope(voles_full, fun = Gest, r = r_vec, 
+                      nsim = 100) 
+### Calculate the actual and theoretical G(r) values, using 100 
+### simulations of CSR for the "theoretical" outcome
+
+
+gfunction ### << Check the output of gfunction, then...
+
+
+### Gather this to plot series in ggplot:
+gfunction_long <- gfunction %>% 
+  as.data.frame() %>% 
+  pivot_longer(cols = obs:hi, names_to = "model", values_to = "g_val")
+
+
+### Then make a graph in ggplot:
+ggplot(data = gfunction_long, aes(x = r, y = g_val, group = model)) +
+  geom_line(aes(color = model)) +
+  theme_minimal() +
+  labs(x = 'radius (m)', y = 'G(r)')
+```
+
+This again confirms clustering - our data (model = obs) has a greater proportion of events with nearest neighbor at *smaller distances* compared to a theoretical CSR scenario (model = theo). But remember, the G-function only considers the single nearest neighbor. 
+
+Let's similarly look at the L-function (standardized Ripley's K-function) which considers densities of observations within some distance R (expanding circles around each point) for comparison. This is using very similar code, but now the function is `Lest` for "L estimate", which calculates the density of events within growing circles around *each point*. That is much more intensive than just the single nearest neighbor, so I run `nsim = 10` here instead (you can do 100 or more again, you'll just notice that creating the simulations takes longer).
+
+For a completely random (uniform Poisson) point pattern, the theoretical value of the L-function is L(r) = r.
+
+```{r}
+r_vec2 <- seq(0, 80000, by = 5000)
+
+lfunction <- envelope(voles_full, fun = Lest, r = r_vec2, 
+                      nsim = 10)
+
+# Gather this to plot series in ggplot:
+lfunction_long <- lfunction %>% 
+  as.data.frame() %>% 
+  pivot_longer(cols = obs:hi, names_to = "model", values_to = "l")
+
+
+ggplot(data = lfunction_long, aes(x = r, y = l, group = model)) +
+  geom_line(aes(color = model)) +
+  theme_minimal() +
+  labs(x = 'radius (m)', y = 'L(r)')
+```
+
+We again see that at lower distances, our data overall has a higher density of nearest neighbors compared to a simulated CSR scenario. Again, evidence of clustering. 
+
+## End Lab 8 part 1
+
+
+
+

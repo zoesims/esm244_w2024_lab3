@@ -1,0 +1,199 @@
+---
+title: 'ESM 244 Winter 2022: Lab 7 Key'
+subtitle: 'Wrangling & visualizing spatial data'
+author: "Allison Horst, Casey O'Hara"
+date: "2/23/2023"
+output: html_document
+---
+
+```{r setup, echo = TRUE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(here)
+library(broom)
+
+# Spatial data packages
+library(sf)
+library(tmap)
+```
+
+# Part 0: Lab set-up
+
+- Fork the [lab 7 repo from GitHub](https://github.com/oharac/esm244_w2023_lab7), then clone to create a local version-controlled R Project. The project contains the required data in a `data` subfolder, and the keys in the `keys` subfolder. The keys should be for reference if you get stuck - but it is very important for learning and retention that you try following along **on your own** first, troubleshooting as needed, before you use the key for help. 
+
+- Add a new subfolder (called `my_code` or something) where you'll save your R Markdown documents following along with the instructions below. 
+
+# Part 1: Spatial data wrangling, visualization, and a variogram
+
+In the Week 7 lecture, we learned a bit more about projection and coordinate reference systems, types of spatial data, and investigating spatial autocorrelation using *variograms*. In this first part of lab we'll practice working with spatial data, then move on to variograms and spatial interpolation in the next part.  We'll look at point pattern analysis (exploring spatial clustering) next week. 
+
+Today, we'll use vector data (polygons, points) to practice reading in spatial data, checking & updating the CRS, and doing some wrangling and visualization. 
+
+We'll use several datasets:
+
+- California County shapefile (ca_counties_tiger_2016.shp) from the US Census Bureau's 2016 MAF/TIGER database (accessed [here](https://data.ca.gov/dataset/ca-geographic-boundaries/resource/b0007416-a325-4777-9295-368ea6b710e6?inner_span=True))
+- Red sesbania records (invasive species) from the CA DFW (accessed [here](https://map.dfg.ca.gov/metadata/ds0080.html))
+
+### A. California county outlines (polygons)
+
+#### Read it in with `read_sf` 
+
+First, let's read in the California county shapefile:
+```{r}
+ca_counties_sf <- read_sf(here("data", "ca_counties", "CA_Counties_TIGER2016.shp"))
+```
+
+#### Do a bit of wrangling (and see sticky geometry!)
+
+Use `View(ca_counties)` to check out what it contains. Let's simplify it by only keeping two attributes: NAME (county name) and ALAND (land area), then renaming those to `county_name` and `land_area`. 
+
+```{r}
+ca_subset_sf <- ca_counties_sf %>% 
+  janitor::clean_names() %>%
+  select(county_name = name, land_area = aland)
+
+head(ca_subset_sf) ### WARN AGAINST View()
+```
+
+Take a look at `ca_subset_sf`. We should notice something very important about a simple features (sf) object: it just **assumes** you want to keep the spatial information, and you can work with the rest of the data as if it's a non-spatial data frame (and the spatial information just "sticks" - hence the term "sticky geometry"). So even though we only called (and renamed) `name` and `aland` in the `select()` function, we see that the `geometry` column still exists! 
+
+What if we wanted just the dataframe, without the geometry?  Convert to dataframe and select out the geometry column:
+
+```{r}
+ca_counties_df <- ca_counties_sf %>%
+  as.data.frame() %>%
+  select(-geometry)
+```
+
+
+#### Check and set the CRS
+
+Use `st_crs()` to check the existing CRS for spatial data. We see that this CRS is "pseudo-mercator" based on WGS 84 - primarily used for web mapping, not analysis.  WGS84 (epsg:3857), also note proj4 string and WKT definitions.
+
+```{r}
+ca_subset_sf %>% st_crs()
+ca_subset_sf %>% raster::crs() ### to show proj4 string
+```
+
+#### Look at it
+
+Plot the California counties using `geom_sf()`. Notice that we can update aesthetics just like we would for a regular ggplot object. Here, we update the color based on land area (and change the color gradient). 
+
+```{r}
+ggplot(data = ca_subset_sf) +
+  geom_sf(aes(fill = land_area), color = "white", size = 0.1) +
+  theme_void() +
+  scale_fill_gradientn(colors = c("cyan","blue","purple"))
+```
+
+
+#### Notice what aesthetics we *didn't* have to specify here?
+
+`geom_sf` knows to look for a column called `geometry` (or sometimes `geom`).
+
+
+### B. Invasive red sesbania records (spatial points)
+
+Red sesbania (*Sesbania punicea*) is an invasive plant (see more information from the [California Invasive Plants Council](https://www.cal-ipc.org/plants/profile/sesbania-punicea-profile/)). Observations for locations of invasive red sesbania are from CA DFW. See metadata and information here: https://map.dfg.ca.gov/metadata/ds0080.html
+
+The data exist in `data/red_sesbania`, and the shapefile is stored as `ds80.shp`. Let's read in the data: 
+
+```{r}
+sesbania_sf <- read_sf(here("data","red_sesbania","ds80.shp")) %>%
+  janitor::clean_names()
+
+# Check the CRS:
+sesbania_sf %>% st_crs()
+sesbania_sf %>% raster::crs()
+```
+
+Notice that this CRS is different from the California counties CRS, so we'll want to update it to match. Use `st_transform()` to update the CRS:
+
+```{r}
+### if you know the EPSG code:
+sesbania_3857_sf <- st_transform(sesbania_sf, 3857)
+### if you don't know the EPSG code:
+sesbania_3857_2_sf <- st_transform(sesbania_sf, st_crs(ca_counties_sf))
+
+# Then check it: 
+sesbania_3857_sf %>% st_crs()
+```
+Cool, now they have the same CRS. 
+
+#### Plot them together! 
+
+Note: this may take a minute.  Remember, later geoms go on top.
+
+```{r}
+ggplot() +
+  geom_sf(data = ca_subset_sf) +
+  geom_sf(data = sesbania_3857_sf, size = 1, color = "red")
+```
+
+
+#### A bit of wrangling! 
+
+Let's say we want to find the count of red sesbania observed locations in this dataset *by county*. How can I go about joining these data so that I can find counts? Don't worry...`st_join()` has you covered for spatial joins! 
+
+```{r}
+ca_sesb_sf <- ca_subset_sf %>% 
+  st_join(sesbania_3857_sf)
+
+head(ca_sesb_sf)
+```
+
+And then we can find counts (note: these are not counts for individual plants, but by record in the dataset) by county.  We can't just count the rows (e.g., using count()) because some rows are counties with no records (and sesbania information is all NAs)
+```{r}
+sesb_counts_sf <- ca_sesb_sf %>% 
+  group_by(county_name) %>%
+  summarize(n_records = sum(!is.na(id)))
+
+head(sesb_counts_sf)
+```
+
+Then we can plot a choropleth using the number of records for red sesbania as the fill color (instead of what we used previously, land area):
+```{r}
+ggplot(data = sesb_counts_sf) +
+  geom_sf(aes(fill = n_records), color = "white", size = 0.1) +
+  scale_fill_gradientn(colors = c("lightgray","orange","red")) +
+  theme_minimal() +
+  labs(fill = "Number of S. punicea records")
+```
+
+So we see that we can still use our usual wrangling skills! Let's do a bit more for fun, just to prove that our existing wrangling skills still work with spatial data - the spatial information just sticks to it! Only plot the county with the greatest number of red sesbania records (Solano), and make a map of those locations (yeah there are many ways to do this): 
+
+```{r}
+# Subset of sesbania point locations only in Solano County
+solano_sesb_sf <- sesbania_sf %>% 
+  filter(county == "Solano")
+
+# Only keep Solano polygon from California County data
+solano_sf <- ca_subset_sf %>% 
+  filter(county_name == "Solano")
+
+ggplot() +
+  geom_sf(data = solano_sf) +
+  geom_sf(data = solano_sesb_sf, color = 'red')
+```
+
+### C. Making an interactive map with {tmap}
+
+Sometimes we'll want to make a map interactive so that audience members can zoom in, explore different areas, etc. We can use the {tmap} package to create an interactive map. Let's make one for our California counties (fill aesthetic by land area) with the red sesbania locations on top:
+
+```{r}
+# Set the viewing mode to "interactive":
+tmap_mode(mode = "view")
+
+# Then make a map (with the polygon fill color updated by variable 'land_area', updating the color palette to "BuGn"), then add another shape layer for the sesbania records (added as dots):
+tm_shape(ca_subset_sf) +
+  tm_fill("land_area", palette = "BuGn") +
+  tm_shape(sesbania_sf) +
+  tm_dots()
+```
+See *all* kinds of other cool ways you can update your interactive tmaps. 
+
+See: 
+
+- [`tmap` vignettes](https://cran.r-project.org/web/packages/tmap/vignettes/tmap-getstarted.html)
+- [Chapter 8 in Robin Lovelace's "Geocomputation in R"](https://geocompr.robinlovelace.net/adv-map.html#interactive-maps) 
+

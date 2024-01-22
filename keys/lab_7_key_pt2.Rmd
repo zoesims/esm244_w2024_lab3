@@ -1,0 +1,170 @@
+---
+title: 'ESM 244 Lab 7 Part 2: Spatial kriging'
+author: "Allison Horst, Casey O'Hara"
+date: "2/23/2023"
+output: html_document
+---
+
+```{r setup, echo = TRUE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(here)
+library(sf)
+library(tmap)
+library(gstat)
+library(stars)
+```
+
+## Read in the California depth to groundwater data
+
+**Data source:** California Department of Water Resources. (2016). Groundwater Depth, California, Fall 2013. California Department of Water Resources. Available at: http://purl.stanford.edu/py212tb3061.
+
+These data are measurements for depth to groundwater recorded in 2013. We'll read in the layer with `read_sf()`, check the CRS, then make a quick plot to start
+
+```{r}
+### Read in the CA county data (TIGER shapefile):
+ca_counties_sf <- read_sf(here("data/ca_counties"), layer = "CA_Counties_TIGER2016") %>% 
+  janitor::clean_names() %>% 
+  select(name)
+
+### Check the projection
+st_crs(ca_counties_sf)
+
+### Read in the depth to groundwater layer: 
+ca_dgw_sf <- read_sf(here("data/ca_dgw/F2013_DBGS_Points_20150720_093252.gpkg")) %>% 
+  janitor::clean_names()
+
+### Check the projection:
+st_crs(ca_dgw_sf) # WGS 84, epsg:4326
+
+### update the groundwater data to match the counties CRS
+ca_dgw_sf <- st_transform(ca_dgw_sf, st_crs(ca_counties_sf))
+
+### can also tell it the EPSG code directly if you know it
+# ca_dgw_sf <- st_transform(ca_dgw_sf, 3857)
+
+### Make a quick ggplot:
+ggplot() +
+  geom_sf(data = ca_counties_sf) +
+  geom_sf(data = ca_dgw_sf, aes(color = dgbs))
+```
+
+## Map these interactively to explore further
+
+```{r}
+tmap_mode("view")
+
+tm_shape(ca_dgw_sf) +
+  tm_dots("dgbs", palette = 'Blues')
+### note - no CA map here, Leaflet does that for us
+
+### check out all the palettes:
+# tmaptools::palette_explorer() ### need package shinyjs
+```
+
+Let's just look at depth to groundwater (ft) in and around San Joaquin County. 
+
+```{r}
+### Just get sj_county
+sj_county_sf <- ca_counties_sf %>% 
+  filter(name == "San Joaquin")
+
+### Now keep observations for groundwater depth within that county:
+sj_depth_sf <- ca_dgw_sf %>% 
+  st_intersection(sj_county_sf)
+
+### Make a quick plot of those: 
+ggplot() +
+  geom_sf(data = sj_county_sf) +
+  geom_sf(data = sj_depth_sf, aes(color = dgbs)) +
+  theme_void() +
+  scale_color_viridis_c()
+```
+
+### Check for duplicate locations:
+
+Interpolation chokes when observations at identical location - spatial singularity!
+
+```{r}
+well_duplicates <- sj_depth_sf %>% 
+  janitor::get_dupes(latitude, longitude)
+
+well_duplicates
+
+### This will cause problems (0 spatial variance). We're just going to get rid of these problematic wells recorded at the same location: 
+
+sj_depth_sf <- sj_depth_sf %>% 
+  filter(!local_well %in% well_duplicates$local_well)
+
+### Check again for duplicates: 
+sj_depth_sf %>% 
+  janitor::get_dupes(latitude, longitude) 
+
+### No more duplicates
+```
+
+## Make a variogram: 
+
+```{r}
+# Create the variogram
+sj_dgw_vgm <- gstat::variogram(dgbs ~ 1, data = sj_depth_sf)
+
+### Plot it
+plot(sj_dgw_vgm) 
+### Looks variogramish! Increasing variance as observations get further
+### apart. Let's model this...
+
+### Now create the variogram model, & see ?vgm for other model options: 
+sj_dgw_vgm_fit <- fit.variogram(sj_dgw_vgm, 
+                                model = vgm(model = "Gau")) ### default starting
+### Plot them together:
+plot(sj_dgw_vgm, sj_dgw_vgm_fit) 
+
+### Estimate nugget, sill, range
+sj_dgw_vgm_fit <- fit.variogram(sj_dgw_vgm, 
+                                model = vgm(model = "Gau", ### (leave with defaults first)
+                                            nugget = 20, sill = 3000, range = 30000))
+### Plot them together:
+plot(sj_dgw_vgm, sj_dgw_vgm_fit) 
+
+### You can check the sum of squares of residuals for each: 
+attr(sj_dgw_vgm_fit, 'SSErr') # ...and you could compare to other models...
+
+```
+
+## Spatial kriging
+
+```{r}
+### Make a grid over which we'll krige: 
+sj_grid <- st_bbox(sj_county_sf) %>%
+  stars::st_as_stars(dx = 1000, dy = 1000) %>%
+  st_crop(sj_county_sf)
+
+# sj_grid
+
+### Look at the grid we made: 
+plot(sj_grid)
+
+### Perform ordinary kriging: 
+sj_dgw_krige <- krige(dgbs ~ 1, sj_depth_sf, sj_grid, model = sj_dgw_vgm_fit)
+
+### Initial plot of kriging outcome: 
+plot(sj_dgw_krige)
+
+### Convert it to a spatial data frame
+krige_df <- as.data.frame(sj_dgw_krige) %>% 
+  st_as_sf(coords = c("x","y")) %>% 
+  drop_na(var1.pred)
+
+st_crs(krige_df) <- 3857
+
+### Then we can use ggplot: 
+ggplot(data = krige_df) +
+  geom_sf(aes(color = var1.pred)) +
+  scale_color_gradient(low = "blue", high = "yellow")
+```
+
+...& there are ways to convert this to raster data / aggregate if you want...
+
+## End variogram & kriging demo
+
