@@ -31,7 +31,7 @@ library(stars)
 
 # Overview
 
-Here we will explore creating a variogram in R using groundwater depth data, and use that variogram to estimate groundwater depth in other areas.  To do this, we will interpolate missing values using the kriging method.
+Here we will explore creating a variogram in R using groundwater depth data, and use that variogram to estimate groundwater depth in other areas. To do this, we will interpolate missing values using the kriging method.
 
 # Read in the California depth-to-groundwater data
 
@@ -95,7 +95,7 @@ tm_shape(ca_dgw_sf) +
 
 # Focus on San Joaquin County
 
-Let's just look at depth to groundwater (ft) in and around San Joaquin County. 
+Let's just look at depth to groundwater (ft) in and around San Joaquin County.
 
 ```{r}
 ### Just get sj_county
@@ -117,7 +117,7 @@ ggplot() +
 
 ## Make a variogram
 
-Here, the "formula" specifies the dependent variable and possible covariates.  Our dependent variable is depth, and we won't include any covariates, so just `depth ~ 1`.
+Here, the "formula" specifies the dependent variable and possible covariates. Our dependent variable is depth, and we won't include any covariates, so just `depth ~ 1`.
 
 ```{r}
 sj_dgw_vgm <- gstat::variogram(depth ~ 1, data = sj_depth_sf)
@@ -173,10 +173,10 @@ krige_rast <- dgw_krige %>%
 ### Then we can use ggplot: 
 ggplot() +
   tidyterra::geom_spatraster(data = krige_rast, aes(fill = pred)) +
+  # tidyterra::geom_spatraster(data = krige_rast, aes(fill = var)) +
   geom_sf(data = sj_depth_sf, aes(fill = depth), shape = 21) +
   geom_sf(data = sj_county_sf, color = 'black', fill = NA) +
   scale_fill_gradient(low = "blue", high = "yellow")
 ```
 
 We could try other models and compare how well these other models predict well depth, using cross validation - set aside a few wells out of our dataset, train the variogram on the remaining wells, run the interpolation, then see how well the kriging model predicts those set-aside wells.
-
